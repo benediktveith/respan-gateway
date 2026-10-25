@@ -16,6 +16,7 @@ use tokio::sync::Semaphore;
 #[serde(rename_all = "snake_case")]
 pub enum Action {
     Block,
+    #[serde(alias = "redact")]
     Mask,
 }
 #[derive(Debug, Clone, Deserialize)]
@@ -202,6 +203,7 @@ fn inspect_input(mut input: Input, scanner: &mut Scanner, config: &Config) -> Re
                         &format!("Ark blocked prompt injection in {path}"),
                     ));
                 }
+                let mut json_spans = Vec::new();
                 for result in &report.native {
                     if result.category == "injection"
                         && result
@@ -225,6 +227,14 @@ fn inspect_input(mut input: Input, scanner: &mut Scanner, config: &Config) -> Re
                             &format!("Ark blocked sensitive content in {path}"),
                         ));
                     }
+                    if !blocking && matches!(result.category.as_str(), "pii" | "dlp") {
+                        json_spans.extend(
+                            result
+                                .evidence_spans
+                                .iter()
+                                .map(|span| (span.start_byte, span.end_byte)),
+                        );
+                    }
                 }
                 let mut value: serde_json::Value =
                     serde_json::from_str(arguments).map_err(|_| {
@@ -233,6 +243,13 @@ fn inspect_input(mut input: Input, scanner: &mut Scanner, config: &Config) -> Re
                             "Ark requires valid JSON tool arguments",
                         )
                     })?;
+                if !json_spans.is_empty() {
+                    // Raw findings retain field-name context; mask their containing JSON
+                    // values before checking decoded strings for escaped sensitive data.
+                    let redacted = redact_json_values(arguments, &json_spans)?;
+                    value = serde_json::from_str(&redacted)
+                        .map_err(|_| Fault::internal("Ark JSON redaction failed"))?;
+                }
                 inspect_json(&mut value, scanner, config, path)?;
                 *arguments = serde_json::to_string(&value)
                     .map_err(|_| Fault::internal("Ark JSON encoding failed"))?;
@@ -263,6 +280,85 @@ fn inspect_input(mut input: Input, scanner: &mut Scanner, config: &Config) -> Re
     }
     Ok(input)
 }
+/// Map source evidence to whole JSON scalar values. The caller has already
+/// validated JSON syntax. Never rewrite a key or splice across JSON tokens.
+fn redact_json_values(json: &str, spans: &[(usize, usize)]) -> Result<String, Fault> {
+    let bytes = json.as_bytes();
+    let mut tokens = Vec::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        let start = index;
+        match bytes[index] {
+            b'"' => {
+                index += 1;
+                while index < bytes.len() {
+                    match bytes[index] {
+                        b'\\' => index += 2,
+                        b'"' => {
+                            index += 1;
+                            break;
+                        }
+                        _ => index += 1,
+                    }
+                }
+                let mut next = index;
+                while next < bytes.len() && bytes[next].is_ascii_whitespace() {
+                    next += 1;
+                }
+                let key = next < bytes.len() && bytes[next] == b':';
+                tokens.push((start, index, key));
+            }
+            b'-' | b'0'..=b'9' => {
+                index += 1;
+                while index < bytes.len()
+                    && matches!(bytes[index], b'0'..=b'9' | b'.' | b'e' | b'E' | b'+' | b'-')
+                {
+                    index += 1;
+                }
+                tokens.push((start, index, false));
+            }
+            _ => index += 1,
+        }
+    }
+    let mut replacements = Vec::new();
+    for &(start, end) in spans {
+        if start >= end
+            || end > json.len()
+            || !json.is_char_boundary(start)
+            || !json.is_char_boundary(end)
+        {
+            return Err(Fault::internal("Ark returned invalid evidence offsets"));
+        }
+        let token = tokens.get(tokens.partition_point(|&(_, end, _)| end <= start));
+        let Some(&(token_start, token_end, key)) = token else {
+            return Err(fault(
+                "ark_unsafe_json_redaction",
+                "Ark cannot safely redact this JSON finding",
+            ));
+        };
+        if key {
+            return Err(fault(
+                "ark_sensitive_key",
+                "Ark cannot mask a sensitive tool argument key",
+            ));
+        }
+        if token_start > start || token_end < end {
+            return Err(fault(
+                "ark_unsafe_json_redaction",
+                "Ark cannot safely redact this JSON finding",
+            ));
+        }
+        replacements.push((token_start, token_end));
+    }
+    replacements.sort_unstable();
+    replacements.dedup();
+    let mut redacted = json.to_owned();
+    for (start, end) in replacements.into_iter().rev() {
+        redacted.replace_range(start..end, "\"[REDACTED]\"");
+    }
+    Ok(redacted)
+}
+
 fn inspect_json(
     value: &mut serde_json::Value,
     scanner: &mut Scanner,
@@ -719,5 +815,111 @@ mod boundary_tests {
         drop(gateway);
         drop(guard);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod redaction_contract_tests {
+    use super::*;
+    use respan_gateway_conversation::{Message, Role};
+
+    #[test]
+    fn redaction_alias_and_unknown_configuration_are_explicit() {
+        for spelling in ["redact", "mask"] {
+            let config: Config =
+                serde_json::from_value(serde_json::json!({"pii":spelling,"dlp":spelling})).unwrap();
+            assert!(matches!(config.pii, Action::Mask));
+            assert!(matches!(config.dlp, Action::Mask));
+        }
+        assert!(
+            serde_json::from_value::<Config>(serde_json::json!({"unknown_policy":true})).is_err()
+        );
+    }
+
+    #[test]
+    fn raw_json_redaction_preserves_escaping_and_deduplicates_value_spans() {
+        let json = r#"{"password":"str\"ange","note":"keep"}"#;
+        let start = json.find("str").unwrap();
+        let redacted =
+            redact_json_values(json, &[(start, start + 2), (start + 1, start + 3)]).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&redacted).unwrap();
+        assert_eq!(value["password"], "[REDACTED]");
+        assert_eq!(value["note"], "keep");
+        let json = r#"{"account":123456789,"note":"keep"}"#;
+        let start = json.find("123456789").unwrap();
+        let redacted = redact_json_values(json, &[(start, start + 9)]).unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&redacted).unwrap()["account"],
+            "[REDACTED]"
+        );
+    }
+
+    #[test]
+    fn unsafe_key_cross_token_and_utf8_offsets_are_refused() {
+        let json = r#"{"sensitive-key":"Grüße","other":"safe"}"#;
+        let key = json.find("sensitive-key").unwrap();
+        assert!(redact_json_values(json, &[(key, key + 3)]).is_err());
+        let text = json.find("Grüße").unwrap();
+        let other = json.find("other").unwrap();
+        assert!(redact_json_values(json, &[(text, other + 2)]).is_err());
+        let u = json.find('ü').unwrap();
+        assert!(redact_json_values(json, &[(u + 1, u + 2)]).is_err());
+    }
+
+    #[tokio::test]
+    async fn client_cancellation_keeps_real_work_reserved_until_it_ends() {
+        let guard = Ark::new(Config {
+            max_queued: 0,
+            ..Config::default()
+        })
+        .unwrap();
+        let state = Arc::clone(&guard.0);
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let blocker = std::thread::spawn(move || {
+            let _lock = state.scanner.lock().unwrap();
+            held_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        });
+        held_rx.recv().unwrap();
+        let running_guard = guard.clone();
+        let task = tokio::spawn(async move {
+            running_guard
+                .inspect(Input::new([Message::new(Role::User, "hello")]))
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while guard.0.active.available_permits() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert_eq!(guard.0.active.available_permits(), 0);
+        assert_eq!(guard.0.slots.available_permits(), 0);
+        assert!(
+            guard
+                .inspect(Input::new([Message::new(Role::User, "hello")]))
+                .await
+                .is_err()
+        );
+        release_tx.send(()).unwrap();
+        blocker.join().unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while guard.0.slots.available_permits() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            guard
+                .inspect(Input::new([Message::new(Role::User, "hello")]))
+                .await
+                .is_ok()
+        );
     }
 }

@@ -864,8 +864,8 @@ fn ark_configuration_is_optional_and_parses_native_policy() {
 formats=["openai-chat"]
 base_url="http://127.0.0.1:12345/v1"
 [plugins.ark]
-pii="mask"
-dlp="block"
+pii="redact"
+dlp="redact"
 max_queued=2
 [plugins.ark.scanner]
 max_input_bytes=4096
@@ -875,6 +875,7 @@ max_findings=32
     .expect("valid Ark configuration");
     let ark = config.plugins.ark.expect("configured Ark");
     assert!(matches!(ark.pii, respan_gateway_plugin_ark::Action::Mask));
+    assert!(matches!(ark.dlp, respan_gateway_plugin_ark::Action::Mask));
     assert_eq!(ark.scanner.max_input_bytes, 4096);
     assert_eq!(ark.max_queued, 2);
 }

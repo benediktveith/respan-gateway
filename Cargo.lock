@@ -1429,7 +1429,6 @@ dependencies = [
 [[package]]
 name = "patronus-ark-core"
 version = "0.1.11"
-source = "git+https://github.com/patronus-protect/patronus-security?rev=fdda717#fdda7177571c4c6349ed55ebbca74ccceeb41299"
 dependencies = [
  "aho-corasick",
  "blake3",
@@ -2086,6 +2085,7 @@ dependencies = [
  "respan-gateway-core",
  "respan-gateway-http",
  "respan-gateway-http-transport",
+ "respan-gateway-plugin-tool-loop",
  "serde",
  "serde_json",
  "tokio",
