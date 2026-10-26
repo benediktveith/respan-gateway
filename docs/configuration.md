@@ -189,76 +189,37 @@ Linkup), the `/mcp` endpoint that merges them, and the tool loop are in
 
 ## Local Ark guardrails
 
-Build with `cargo build -p respan-gateway --features ark` for native checks,
-or `--features ark-wolf` to compile the ONNX inference path as well. Model
-weights stay in a local asset directory; they are not embedded in the binary.
-Ark is absent from the default build and off unless `[plugins.ark]` is configured.
-
-The plugin checks chat message text, reasoning, tool arguments and nested tool
-results before answering plugins and again before each provider call. Each text
-field is its own Wolf document. Response streams are not scanned. Unsupported
-content and scanner errors refuse forwarding.
-
-This example redacts both PII and DLP findings. `mask` and `redact` are aliases;
-`block` refuses the request. Both categories default to `block` when omitted.
-PI-L1 and Wolf findings block; disable a category explicitly to omit its checks.
+Build with `--features ark` for native checks or `--features ark-wolf` to run
+Wolf Defender. Configure the plugin explicitly; it is off when its section is
+absent. Startup stays offline by default. Opt into preparing missing pinned model
+assets with `warmup.download = "missing"`; request scans never download assets.
 
 ```toml
 [plugins.ark]
 pii = "redact"
 dlp = "redact"
+pii_sources = ["user_input", "tool_call", "tool_result"]
+dlp_sources = ["user_input", "tool_call", "tool_result"]
+pi_sources = ["user_input", "tool_result"]
 max_queued = 32
 queue_timeout_ms = 1000
 scan_timeout_ms = 30000
 max_request_bytes = 1048576
 
-[plugins.ark.scanner]
-categories = ["pii", "dlp", "injection"]
-pii_mode = "strict"
-dlp_mode = "strict"
-explain = false
-max_input_bytes = 1048576
-max_findings = 10000
+[plugins.ark.warmup]
+download = "missing"
+download_timeout_ms = 600000 # Asset acquisition only; separate from scan deadlines.
 
-# Optional overrides; omitted entries retain Ark defaults.
-# [plugins.ark.scanner.rules]
-# pii_email = true
-# [plugins.ark.scanner.models]
-# "native:injection_l1" = true
-
-# Optional local model, requires the ark-wolf build feature:
-# [plugins.ark.scanner.wolf]
-# bundle_dir = "/srv/models/wolf"
-# threshold = 0.8 # Example only: select your decision threshold explicitly.
-# backend = "cpu"
-# [plugins.ark.scanner.wolf.runtime_options]
-# intra_threads = 1
-# inter_threads = 1
-# spinning = false
+[plugins.ark.scanner.wolf]
+bundle_dir = "/srv/models/wolf-defender"
+threshold = 0.8 # Example policy value; validate your threshold.
+backend = "cpu"
 ```
 
-| Setting | Default | Meaning |
-|---|---|---|
-| `pii`, `dlp` | `block` | Independently block or redact the category's findings |
-| `max_queued` | `32` | Waiting scans, in addition to one active scanner; allowed `0..=1024` |
-| `queue_timeout_ms` | `1000` | Maximum wait for the scanner |
-| `scan_timeout_ms` | `30000` | Maximum await time for a started scan |
-| `max_request_bytes` | `1048576` | Sum of text and tool-argument bytes in the request |
-| `scanner.categories` | all three | Any nonempty subset of `pii`, `dlp`, `injection` |
-| `scanner.pii_mode`, `scanner.dlp_mode` | `strict` | `strict`, `balanced` or `recall` |
-| `scanner.rules`, `scanner.models` | Ark defaults | Rule-ID and native-model-ID Boolean overrides |
-| `scanner.explain` | `false` | Include native detector explanations internally |
-| `scanner.max_input_bytes` | `1048576` | Maximum size of one text field |
-| `scanner.max_findings` | `10000` | Maximum actionable evidence spans per scan |
-| `scanner.wolf` | absent | Optional local FP16 assets plus required `threshold` in `[0,1]` |
-| `scanner.wolf.backend` | `auto` | ONNX execution provider; CPU is locally verified |
-| `scanner.wolf.runtime_options` | one intra/inter thread, no spinning | `intra_threads`, `inter_threads`, `spinning` |
+PII/DLP can independently block or redact each supported source. PI blocks
+only on selected `pi_sources`. `user_input` means text in `Role::User` messages;
+tool calls/results use their typed Respan content. Reasoning and passthrough
+metadata are not scanned. There is no separate Skill source in the chat API.
 
-Input and provider guards share one warm scanner and one active scan. Timeout
-or client cancellation does not free its capacity until the blocking job actually
-ends. No model failure silently falls back to L1-only. Masking uses `[REDACTED]`;
-JSON remains valid. A finding that relies on the raw JSON field context redacts
-the containing scalar value as a whole; other fields remain intact. A redacted
-numeric value becomes a string. Sensitive JSON keys are refused rather than renamed. Field boundaries and message roles
-are preserved. This version has no role exclusions, response redaction or
-configurable replacement token.
+See the [plugin README](../crates/plugins/ark/README.md) for the complete setting
+table, native detector controls, scan matrix and exact admission/error behavior.

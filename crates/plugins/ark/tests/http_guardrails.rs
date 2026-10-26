@@ -21,25 +21,72 @@ fn tool_body(arguments: &str) -> Value {
 
 #[tokio::test]
 async fn dlp_mask_preserves_unicode_and_unions_overlapping_pii_ranges() {
+    use patronus_ark_core::{ScanChecks, Scanner};
+    let config = masking();
+    let mut scanner = Scanner::new(config.scanner.clone()).unwrap();
+    let prefix = "\u{1f512} Gr\u{fc}\u{df}e: ";
+    let suffix = " \u{2014} fertig";
+    let header = "-----BEGIN PRIVATE KEY-----";
+    let footer = "-----END PRIVATE KEY-----";
+    let old = format!("{prefix}{header}\nalice@example.org\n{footer}{suffix}");
+    let start = old.find(header).unwrap();
+    let end = old.find(footer).unwrap() + footer.len();
+    let original = scanner.scan(&old).unwrap();
+    assert!(
+        !original
+            .native
+            .iter()
+            .filter(|r| r.category == "dlp")
+            .flat_map(|r| &r.evidence_spans)
+            .any(|s| s.start_byte <= start && s.end_byte >= end),
+        "the old example-domain body must not qualify as an original whole-key finding"
+    );
+    // Avoid the old example-domain fixture: a second scan of its masked output
+    // removed the example marker and created an unrelated DLP finding.
+    let address = "maria@quarzwerk.de";
+    let text = format!("{prefix}{header}\n{address}\n{footer}{suffix}");
+    let start = text.find(header).unwrap();
+    let end = text.find(footer).unwrap() + footer.len();
+    let original = scanner.scan(&text).unwrap();
+    assert!(
+        original
+            .native
+            .iter()
+            .filter(|r| r.category == "dlp")
+            .flat_map(|r| &r.evidence_spans)
+            .any(|s| s.start_byte <= start && s.end_byte >= end),
+        "overlap fixture requires a whole-key DLP finding on the original input"
+    );
+    let pii = scanner
+        .scan_with_checks(
+            &text,
+            ScanChecks {
+                pii: true,
+                dlp: false,
+                injection: false,
+            },
+        )
+        .unwrap();
+    assert!(
+        pii.native
+            .iter()
+            .flat_map(|r| &r.evidence_spans)
+            .any(|s| s.start_byte >= start && s.end_byte <= end),
+        "overlap fixture also requires an independently detected PII span inside the key"
+    );
     let fake = mockllm::FakeOpenAi::start().await;
     fake.answer(mockllm::Answer::text("ok"));
-    let guard = Ark::new(masking()).unwrap();
+    let guard = Ark::new(config).unwrap();
     let gateway = gateway(&fake.base_url(), Some(&guard));
-    let overlapping = "-----BEGIN PRIVATE KEY-----\nalice@example.org\n-----END PRIVATE KEY-----";
-    let (status, body) = send(
-        &gateway,
-        text_body(&format!("🔒 Grüße: {overlapping} — fertig")),
-    )
-    .await;
+    let (status, body) = send(&gateway, text_body(&text)).await;
     assert_eq!(status, 200, "{body}");
     let requests = fake.requests();
     assert_eq!(requests.len(), 1);
-    assert_eq!(
-        requests[0].body["messages"][0]["content"],
-        "🔒 Grüße: [REDACTED] — fertig"
-    );
-    assert!(!requests[0].body.to_string().contains("PRIVATE KEY"));
-    assert!(!requests[0].body.to_string().contains("alice@example.org"));
+    let forwarded = requests[0].body["messages"][0]["content"].as_str().unwrap();
+    assert!(!forwarded.contains("PRIVATE KEY"));
+    assert!(!forwarded.contains(address));
+    assert_eq!(forwarded.matches("[REDACTED]").count(), 1);
+    assert_eq!(forwarded, format!("{prefix}[REDACTED]{suffix}"));
 }
 
 #[tokio::test]
@@ -122,10 +169,9 @@ async fn native_injection_and_resource_failures_never_reach_the_provider() {
     })
     .unwrap();
     let limited = support::gateway(&fake.base_url(), Some(&guard));
-    assert_eq!(
-        send(&limited, text_body("longer than four bytes")).await.0,
-        400
-    );
+    let (status, body) = send(&limited, text_body("longer than four bytes")).await;
+    assert_eq!(status, 413, "{body}");
+    assert!(body.contains("ark_input_limit"));
     assert!(fake.requests().is_empty());
     assert!(
         Ark::new(Config {
@@ -178,7 +224,8 @@ async fn invalid_tool_json_and_scanner_limits_fail_closed() {
     let guard = Ark::new(config).unwrap();
     let limited = gateway(&fake.base_url(), Some(&guard));
     let (status, body) = send(&limited, text_body("longer than the scanner limit")).await;
-    assert_eq!(status, 400, "{body}");
+    assert_eq!(status, 413, "{body}");
+    assert!(body.contains("ark_input_limit"));
     assert!(fake.requests().is_empty());
 }
 

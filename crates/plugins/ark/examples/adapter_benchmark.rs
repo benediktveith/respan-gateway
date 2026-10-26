@@ -159,7 +159,7 @@ fn window_counts(bundle: &Path) -> Result<(), Box<dyn Error>> {
             })
             .map_err(std::io::Error::other)?;
         Ok(
-            json!({"bytes":text.len(),"content_tokens":tokens,"windows_per_field_per_scan":tokens.div_ceil(256).max(1),"content_window_tokens":256,"overlap":0}),
+            json!({"bytes":text.len(),"content_tokens":tokens,"windows_per_field_per_scan":tokens.div_ceil(patronus_ark_core::wolf::CONTENT_TOKENS).max(1),"content_window_tokens":patronus_ark_core::wolf::CONTENT_TOKENS,"overlap":0}),
         )
     };
     println!(
@@ -192,6 +192,7 @@ async fn measure_mode(mode: &str, bundle: &Path) -> Result<(), Box<dyn Error>> {
             {
                 let mut wolf = patronus_ark_core::wolf::WolfConfig::new(bundle, 0.5);
                 wolf.backend = patronus_ark_core::ExecutionBackend::Cpu;
+                wolf.precision = patronus_ark_core::wolf::WolfPrecision::Fp16;
                 config.scanner.wolf = Some(wolf);
             }
             #[cfg(not(feature = "wolf"))]

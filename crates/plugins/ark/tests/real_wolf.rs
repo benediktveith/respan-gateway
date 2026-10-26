@@ -29,7 +29,9 @@ fn config() -> Config {
     };
     // Deliberately disable PI-L1: an attack block in these tests must come from real Wolf.
     config.scanner.categories = vec![Category::Pii, Category::Dlp];
-    config.scanner.wolf = Some(WolfConfig::new(bundle, 0.5));
+    let mut wolf = WolfConfig::new(bundle, 0.5);
+    wolf.precision = patronus_ark_core::wolf::WolfPrecision::Fp16;
+    config.scanner.wolf = Some(wolf);
     config
 }
 fn gateway(url: &str, guard: &Ark) -> Gateway {
@@ -175,4 +177,34 @@ async fn real_fp16_and_l1_guard_the_full_mockllm_provider_path() {
         3,
         "provider guard must catch Wolf attacks added in tool follow-ups"
     );
+}
+
+#[tokio::test]
+#[ignore = "requires ARK_WOLF_QUANTIZED_BUNDLE pointing to local pinned INT8/INT4 assets"]
+async fn real_quantized_explicit_selection_and_http_guardrails() {
+    let bundle =
+        std::env::var_os("ARK_WOLF_QUANTIZED_BUNDLE").expect("set ARK_WOLF_QUANTIZED_BUNDLE");
+    let mut config = Config {
+        scan_timeout_ms: 90_000,
+        ..Config::default()
+    };
+    config.scanner.categories = vec![Category::Pii, Category::Dlp];
+    let mut wolf = WolfConfig::new(bundle, 0.5);
+    wolf.precision = patronus_ark_core::wolf::WolfPrecision::Int8Int4;
+    config.scanner.wolf = Some(wolf);
+    let mut scanner = Scanner::new(config.scanner.clone()).unwrap();
+    let report = scanner.scan(BENIGN).unwrap().wolf.unwrap();
+    assert_eq!(report.precision, "int8_int4");
+    assert!(!report.matched);
+    drop(scanner);
+    let guard = Ark::new(config).unwrap();
+    let fake = mockllm::FakeOpenAi::start().await;
+    fake.answer(mockllm::Answer::text("Quantized response."));
+    let gateway = gateway(&fake.base_url(), &guard);
+    let (status, body) = send(&gateway, "/v1/chat/completions", BENIGN).await;
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains("Quantized response"));
+    let (status, body) = send(&gateway, "/v1/chat/completions", ATTACK).await;
+    assert_eq!(status, 400, "{body}");
+    assert_eq!(fake.requests().len(), 1);
 }

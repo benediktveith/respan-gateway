@@ -1,5 +1,12 @@
 # Local adapter measurements
 
+For current model-only memory accounting, see the [RSS and physical-footprint
+audit](memory-ab.md). The historical RSS number below is not live-weight memory.
+
+The recorded run below belongs to local plugin commit `0019103`, before the
+PI field-scope and metadata-coverage refinements. It is historical data, not a
+measurement of the current branch head. Rerun the harness to measure that head.
+
 Build the measurement harness once, wait for other builds and model tests to
 finish, then run the compiled binary directly:
 
@@ -16,8 +23,7 @@ response consumption, without an inbound listener, client socket or inbound
 TLS. The provider hop is real loopback TCP/HTTP to `mockllm`; no external
 provider or network is involved.
 
-The harness runs baseline HTTP gateway, L1-only guards and L1 plus real Wolf
-FP16 in three fresh sequential processes. It uses `mockllm` over loopback HTTP;
+The harness runs baseline HTTP gateway, L1-only guards and L1 plus real Wolf Defender in three fresh sequential processes. It uses `mockllm` over loopback HTTP;
 provider requests consume their complete replies. Both client and provider
 checks execute in guarded modes, so each original text runs through Wolf twice.
 
@@ -57,7 +63,7 @@ its startup reference check is included. No asset was downloaded or repinned.
 |---|---:|---:|---:|---:|---:|
 | Baseline HTTP | 1.40 ms | 8.98 MiB | 9.73 MiB | 1.51 / 1.76 ms | 1.52 / 1.57 ms |
 | Native L1 | 948 ms | 82.88 MiB | 83.19 MiB | 2.02 / 2.19 ms | 4.96 / 5.41 ms |
-| Native L1 + Wolf FP16 | 2,525 ms | 725.33 MiB | 725.50 MiB | 142.25 / 149.21 ms | 3,076.63 / 3,176.68 ms |
+| Native L1 + Wolf Defender | 2,525 ms | 725.33 MiB | 725.50 MiB | 142.25 / 149.21 ms | 3,076.63 / 3,176.68 ms |
 
 Short input: 54 UTF-8 bytes, 9 content tokens, one Wolf window per edge,
 12 measured samples. Long input: 4,920 bytes, 661 content tokens, three windows
